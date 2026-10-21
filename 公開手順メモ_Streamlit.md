@@ -30,3 +30,9 @@ shap ライブラリは使っていない（LightGBM の pred_contrib で同じ�
 注意
 - 無料枠は公開リポジトリのみ。しばらく使われないとアプリは休止し、次に開いたときに数十秒かけて起き上がる
 - 元の CSV はリポジトリに入れていないので、公開しても自分のチャンネルの生データは出ない（出るのは学習済みモデルと集計値だけ）
+
+## ページ構成（10/21 夜に2ページにした）
+- `app.py`：入口。`st.navigation` で「予測」「精度：どのくらい当たるか」の2ページ
+- `views/predict.py`：1ページ目（入力→予測・寄与・SHAP の図）
+- `views/accuracy.py`：2ページ目（時系列 CV の誤差の比較、実測と予測の散布図、2倍以内の割合）。データは `model/cv_predictions.csv`
+- `cv_predictions.csv` を作り直すとき：`python src/export_cv.py <動画一覧 CSV>`（train.py と同じ分け方・同じパラメータ。パラメータは `src/train_params.py` で共有）
