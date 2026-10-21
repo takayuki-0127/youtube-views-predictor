@@ -1,0 +1,99 @@
+"""公開前の条件から、YouTube 動画の再生数を予測するアプリ（LightGBM・寄与の分解つき）。
+自分のチャンネル（2026年7〜10月・299本）で学習したモデル。元データは同梱していない。
+"""
+import json
+from pathlib import Path
+
+import altair as alt
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from src.features import FEATURES, from_inputs
+
+ROOT = Path(__file__).parent
+st.set_page_config(page_title="再生数の予測（公開前）", page_icon="📈", layout="centered")
+
+
+@st.cache_resource
+def load():
+    booster = lgb.Booster(model_file=str(ROOT / "model" / "point.txt"))
+    meta = json.load(open(ROOT / "model" / "meta.json", encoding="utf-8"))
+    return booster, meta
+
+
+booster, meta = load()
+WEEK = ["月", "火", "水", "木", "金", "土", "日"]
+
+st.title("公開前の条件から、再生数を予測する")
+st.caption(
+    f"自分の YouTube チャンネル（{meta['period'][0]}〜{meta['period'][1]} 公開の {meta['n_videos']} 本）で学習した LightGBM。"
+    "公開前にわかる情報だけを使い、再生数・クリック率など公開後の数値は使っていません。"
+)
+
+with st.sidebar:
+    st.header("動画の条件")
+    kind = st.radio("種類", ["Shorts", "長尺"], horizontal=True)
+    if kind == "Shorts":
+        length = st.slider("長さ（秒）", 5, 60, 30)
+    else:
+        minutes = st.slider("長さ（分）", 1, 180, 20)
+        length = minutes * 60
+    weekday = st.selectbox("公開の曜日", range(7), format_func=lambda i: WEEK[i] + "曜日", index=2)
+    title = st.text_input("タイトル", "【検証】毎日Shortsを出したら何が変わる？ #shorts" if kind == "Shorts" else "1週間の作業ログと振り返り")
+    with st.expander("投稿の間隔など（ふだんどおりならそのまま）"):
+        gap_all = st.number_input("前の投稿からの日数", 0, 7, 0)
+        gap_same = st.number_input("同じ種類の前の投稿からの日数", 0, 14, 1)
+        same_day = st.number_input("同じ日の投稿本数（この動画を含む）", 1, 6, 3)
+        days = st.slider("チャンネル開始からの日数", 0, meta["max_days_since_start"], meta["max_days_since_start"],
+                         help="学習データの最後の日より先は、最後の日として扱います（モデルは学習範囲の外を外挿できないため）")
+
+X = from_inputs(kind == "Shorts", length, weekday, gap_all, gap_same, same_day, title, days)
+pred_log = float(booster.predict(X)[0])
+q10, q90 = meta["residual_q10_q90"][kind]
+point, lo, hi = np.expm1(pred_log), np.expm1(pred_log + q10), np.expm1(pred_log + q90)
+
+c1, c2 = st.columns([1, 1])
+c1.metric("予測（公開後の再生数）", f"{point:,.0f} 回")
+c2.metric("おおよその範囲", f"{max(lo, 0):,.0f} 〜 {hi:,.0f} 回")
+st.caption(
+    f"範囲は、過去の予測の外れ方（10%〜90%の幅）から作っています。時期を追った検証では、実際の値がこの範囲に入ったのは約{meta['cv_rmse_log']['interval_80_coverage']*100:.0f}%で、"
+    "目標の80%より少なめです。目安として見てください。"
+    f"　参考：学習データの中央値は Shorts {meta['median_views']['Shorts']:,.0f} 回、長尺 {meta['median_views']['長尺']:,.0f} 回。"
+)
+
+# --- 寄与の分解（LightGBM の pred_contrib ＝ TreeSHAP と同じ値） ---
+contrib = booster.predict(X, pred_contrib=True)[0]
+base, parts = contrib[-1], pd.Series(contrib[:-1], index=FEATURES)
+labels = {"Shorts": "種類（Shorts）", "log長さ": "長さ", "曜日": "曜日", "土日": "土日", "前の投稿からの日数": "前の投稿からの日数",
+          "同じ種類の前の投稿からの日数": "同じ種類の間隔", "同じ日の投稿本数": "同じ日の本数", "タイトル文字数": "タイトルの長さ",
+          "絵文字あり": "絵文字", "#shortsあり": "#shorts", "開始からの日数": "公開の時期"}
+df = pd.DataFrame({"条件": [labels[f] for f in FEATURES], "寄与": parts.values})
+df["倍率"] = np.exp(df["寄与"])
+df = df.reindex(df["寄与"].abs().sort_values(ascending=False).index)
+
+st.subheader("何が予測を上げ下げしたか")
+st.caption(f"平均的な動画（約{np.expm1(base):,.0f}回）から、各条件で何倍になったか。1より大きいと上げ、小さいと下げています。")
+top = df.head(6).assign(向き=lambda d: np.where(d["寄与"] >= 0, "上げた", "下げた"), 表示=lambda d: d["倍率"].map(lambda x: f"×{x:.2f}"))
+chart = alt.Chart(top).mark_bar(cornerRadiusEnd=4, height=18).encode(
+    x=alt.X("倍率:Q", scale=alt.Scale(type="log", domain=[min(0.8, top["倍率"].min() * 0.9), max(1.25, top["倍率"].max() * 1.1)]),
+            title="倍率（1 ＝ 変化なし、対数目盛）"),
+    x2=alt.datum(1),
+    y=alt.Y("条件:N", sort=list(top["条件"]), title=None, axis=alt.Axis(labelOverlap=False, labelFontSize=13, labelLimit=200)),
+    color=alt.Color("向き:N", scale=alt.Scale(domain=["上げた", "下げた"], range=["#2a78d6", "#eb6834"]), legend=alt.Legend(title=None, orient="top")),
+    tooltip=["条件", "表示"],
+).properties(height=280)
+st.altair_chart(chart, use_container_width=True)
+st.dataframe(df.assign(倍率=df["倍率"].map(lambda x: f"×{x:.2f}"))[["条件", "倍率"]], hide_index=True, use_container_width=True)
+
+with st.expander("このモデルについて（精度と限界）"):
+    cv = meta["cv_rmse_log"]
+    st.markdown(f"""
+- **精度**：公開日順に5分割した時系列の検証で、誤差（log(1＋再生数) の RMSE）は LightGBM **{cv['lgbm']}**、重回帰 {cv['ols']}、中央値で当てた場合 {cv['median']}。中央値より約{(1-cv['lgbm']/cv['median'])*100:.0f}%小さいが、重回帰とほぼ同じ。
+- **効いているのは種類と長さと時期**。タイトルの長さ・絵文字・曜日・投稿間隔の寄与は小さい。
+- **Shorts 同士の差は、公開前の情報ではほぼ説明できない**（Shorts だけで比べると中央値に勝てない）。差はサムネイル・冒頭・おすすめへの乗り方など、公開後に決まる部分が大きい。
+- **これは予測で、因果ではない**。「曜日を変えれば再生数が変わる」とは言えない。打ち手の効果は、別に A/B の実験で確かめている。
+- **一つのチャンネル・約3か月**のデータなので、ほかのチャンネルや先の時期にはそのまま当てはまらない。
+""")
+st.caption("コード：github.com/takayuki-0127/youtube-views-predictor ／ 分析の全体：github.com/takayuki-0127/youtube-data-mart")
