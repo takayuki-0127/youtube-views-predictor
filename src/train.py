@@ -10,8 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from features import build_from_studio_csv, FEATURES
 
 ROOT = Path(__file__).resolve().parents[1]
-P = dict(n_estimators=300, learning_rate=0.03, num_leaves=8, min_child_samples=10, subsample=0.8,
-         subsample_freq=1, colsample_bytree=0.8, verbose=-1, random_state=0)
+from train_params import P  # パラメータは export_cv.py と共有
 rmse = lambda a, b: float(np.sqrt(np.mean((np.asarray(a) - np.asarray(b)) ** 2)))
 
 X, y, v = build_from_studio_csv(sys.argv[1])
