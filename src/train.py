@@ -49,5 +49,10 @@ meta = {
     "residual_q10_q90": {("Shorts" if k else "長尺"): [round(float(x), 4) for x in g["r"].quantile([0.1, 0.9]).values]
                          for k, g in resid.groupby("Shorts")},
 }
+meta["medians_by_type"] = {}
+for s_, name in ((1, "Shorts"), (0, "長尺")):
+    g = X[X.Shorts == s_]
+    meta["medians_by_type"][name] = {c: float(g[c].median()) for c in FEATURES}
+    meta["medians_by_type"][name]["length_sec_median"] = float(np.expm1(g["log長さ"].median()))
 json.dump(meta, open(ROOT / "model" / "meta.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 print(json.dumps(meta, ensure_ascii=False)[:600])
