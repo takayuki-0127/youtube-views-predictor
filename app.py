@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.features import FEATURES, from_inputs
+from src.features import FEATURES
 
 ROOT = Path(__file__).parent
 st.set_page_config(page_title="再生数の予測（公開前）", page_icon="📈", layout="centered")
@@ -27,29 +27,30 @@ booster, meta = load()
 WEEK = ["月", "火", "水", "木", "金", "土", "日"]
 
 st.title("公開前の条件から、再生数を予測する")
-st.caption(
-    f"自分の YouTube チャンネル（{meta['period'][0]}〜{meta['period'][1]} 公開の {meta['n_videos']} 本）で学習した LightGBM。"
-    "公開前にわかる情報だけを使い、再生数・クリック率など公開後の数値は使っていません。"
-)
+cv = meta["cv_rmse_log"]
+st.markdown(f"""
+- **何を予測するか**：動画を出す前に、公開後の再生数（Shorts はほぼ公開7日の再生数、長尺は累計）がどれくらいになりそうか
+- **使ったデータ**：自分の YouTube チャンネルの書き出し（{meta['period'][0]}〜{meta['period'][1]} 公開・{meta['n_videos']}本）。公開後の数値（クリック率など）は使っていない
+- **モデルの精度**：LightGBM。公開日順の時系列 CV で誤差（log の RMSE）{cv['lgbm']}。中央値で当てた場合（{cv['median']}）より約{(1-cv['lgbm']/cv['median'])*100:.0f}%小さく、重回帰（{cv['ols']}）とほぼ同じ
+- **限界**：予測であって因果ではない。Shorts 同士の差は公開前の情報ではほとんど説明できない。1チャンネル・約3か月のデータ
+""")
 
 with st.sidebar:
     st.header("動画の条件")
+    st.caption("よく変える4つだけを動かせます。ほかの条件（投稿の間隔・1日の本数・公開の時期など）は、学習データの中央値に固定しています。")
     kind = st.radio("種類", ["Shorts", "長尺"], horizontal=True)
+    med = meta["medians_by_type"][kind]
     if kind == "Shorts":
-        length = st.slider("長さ（秒）", 5, 60, 30)
+        length = st.slider("長さ（秒）", 5, 60, int(round(med["length_sec_median"])))
     else:
-        minutes = st.slider("長さ（分）", 1, 180, 20)
-        length = minutes * 60
-    weekday = st.selectbox("公開の曜日", range(7), format_func=lambda i: WEEK[i] + "曜日", index=2)
-    title = st.text_input("タイトル", "【検証】毎日Shortsを出したら何が変わる？ #shorts" if kind == "Shorts" else "1週間の作業ログと振り返り")
-    with st.expander("投稿の間隔など（ふだんどおりならそのまま）"):
-        gap_all = st.number_input("前の投稿からの日数", 0, 7, 0)
-        gap_same = st.number_input("同じ種類の前の投稿からの日数", 0, 14, 1)
-        same_day = st.number_input("同じ日の投稿本数（この動画を含む）", 1, 6, 3)
-        days = st.slider("チャンネル開始からの日数", 0, meta["max_days_since_start"], meta["max_days_since_start"],
-                         help="学習データの最後の日より先は、最後の日として扱います（モデルは学習範囲の外を外挿できないため）")
+        length = st.slider("長さ（時間）", 0.5, 12.0, float(round(med["length_sec_median"] / 3600 * 2) / 2), step=0.5) * 3600
+    weekday = st.select_slider("公開の曜日", options=list(range(7)), value=int(med["曜日"]), format_func=lambda i: WEEK[i])
+    title_len = st.slider("タイトルの文字数", 10, 100, int(med["タイトル文字数"]))
 
-X = from_inputs(kind == "Shorts", length, weekday, gap_all, gap_same, same_day, title, days)
+row = {c: med[c] for c in FEATURES}
+row.update({"Shorts": int(kind == "Shorts"), "log長さ": float(np.log1p(length)), "曜日": weekday, "土日": int(weekday >= 5),
+            "タイトル文字数": title_len, "#shortsあり": int(kind == "Shorts")})
+X = pd.DataFrame([row])[FEATURES]
 pred_log = float(booster.predict(X)[0])
 q10, q90 = meta["residual_q10_q90"][kind]
 point, lo, hi = np.expm1(pred_log), np.expm1(pred_log + q10), np.expm1(pred_log + q90)
