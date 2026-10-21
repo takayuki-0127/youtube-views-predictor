@@ -87,6 +87,27 @@ chart = alt.Chart(top).mark_bar(cornerRadiusEnd=4, height=18).encode(
 st.altair_chart(chart, use_container_width=True)
 st.dataframe(df.assign(倍率=df["倍率"].map(lambda x: f"×{x:.2f}"))[["条件", "倍率"]], hide_index=True, use_container_width=True)
 
+with st.expander("SHAP のウォーターフォール図（log の値で、平均からこの予測までの積み上げ）"):
+    import matplotlib.pyplot as plt
+    plt.rcParams["font.family"] = ["Noto Sans CJK JP", "Yu Gothic", "Meiryo", "Hiragino Sans", "sans-serif"]
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    order = list(df.sort_values("寄与", key=abs, ascending=False).itertuples())
+    cur = base
+    for i, r in enumerate(order):
+        color = "#2a78d6" if r.寄与 >= 0 else "#eb6834"
+        ax.barh(len(order) - 1 - i, r.寄与, left=cur, color=color, height=0.6)
+        ax.text(cur + r.寄与 + (0.01 if r.寄与 >= 0 else -0.01), len(order) - 1 - i, f"{r.寄与:+.2f}",
+                va="center", ha="left" if r.寄与 >= 0 else "right", fontsize=8, color="#52514e")
+        cur += r.寄与
+    ax.set_yticks(range(len(order)), [r.条件 for r in order][::-1], fontsize=9)
+    ax.axvline(base, color="#a3a29c", lw=1, ls="--"); ax.axvline(cur, color="#0b0b0b", lw=1)
+    ax.set_xlabel(f"log(1＋再生数)　平均 {base:.2f} → 予測 {cur:.2f}（約{np.expm1(cur):,.0f}回）")
+    pts = np.cumsum([base] + [r.寄与 for r in order]); pad = (pts.max() - pts.min()) * 0.15
+    ax.set_xlim(pts.min() - pad, pts.max() + pad)
+    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+    st.pyplot(fig)
+    st.caption("値は LightGBM の pred_contrib（TreeSHAP と同じ計算）。青は予測を上げた条件、オレンジは下げた条件。")
+
 with st.expander("このモデルについて（精度と限界）"):
     cv = meta["cv_rmse_log"]
     st.markdown(f"""
